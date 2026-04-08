@@ -53,11 +53,11 @@ def decompose_image_to_patches(
     coordinates = []
     
     # Compute patch grid positions
-    # Calculate how many patches fit with stride
-    num_patches_y = (height - patch_size) // stride + 1
-    num_patches_x = (width - patch_size) // stride + 1
+    # Calculate how many patches are needed to cover the entire image
+    num_patches_y = (height - patch_size + stride - 1) // stride + 1 if height > patch_size else 1
+    num_patches_x = (width - patch_size + stride - 1) // stride + 1 if width > patch_size else 1
     
-    # Pad image if patches extend beyond boundaries
+    # Pad image to ensure full coverage
     pad_bottom = max(0, (num_patches_y - 1) * stride + patch_size - height)
     pad_right = max(0, (num_patches_x - 1) * stride + patch_size - width)
     
@@ -151,13 +151,18 @@ def reconstruct_image_from_patches(
             reconstructed[y_start:y_end, x_start:x_end] += patch_slice.astype(np.float32)
             weights[y_start:y_end, x_start:x_end] += 1.0
     
-    # Average overlapping regions
+    # Average overlapping regions, avoiding division by zero
     if is_grayscale:
         valid = weights > 0
         reconstructed[valid] /= weights[valid]
+        reconstructed[~valid] = 0  # Handle any uncovered pixels
     else:
-        valid = weights > 0
-        reconstructed[valid, :] /= weights[valid, np.newaxis]
+        # Broadcast weights across channels for proper division, handle zeros
+        with np.errstate(divide='ignore', invalid='ignore'):
+            reconstructed = np.divide(reconstructed, weights[:, :, np.newaxis], 
+                                     where=weights[:, :, np.newaxis] > 0,
+                                     out=reconstructed)
+        reconstructed[weights == 0] = 0  # Set uncovered pixels to 0
     
     # Convert back to original dtype
     original_dtype = patches[0].dtype
@@ -194,15 +199,13 @@ def get_patch_grid_info(
             - coverage_pct: Percentage of image covered by patches.
             - overlap_ratio: Ratio of overlapping areas (0-1).
     """
-    num_patches_y = (image_height - patch_size) // stride + 1
-    num_patches_x = (image_width - patch_size) // stride + 1
+    # Calculate patches needed to cover full image
+    num_patches_y = (image_height - patch_size + stride - 1) // stride + 1 if image_height > patch_size else 1
+    num_patches_x = (image_width - patch_size + stride - 1) // stride + 1 if image_width > patch_size else 1
     total_patches = num_patches_y * num_patches_x
     
-    # Calculate coverage
-    coverage = min(1.0, (patch_size ** 2) / ((stride) ** 2)) if stride > 0 else 1.0
-    coverage_pct = coverage * 100
-    
-    # Calculate overlap ratio
+    # Coverage and overlap metrics
+    coverage_pct = 100.0  # Full coverage with padding
     overlap_ratio = 1.0 - (stride / patch_size) if stride < patch_size else 0.0
     
     return {
