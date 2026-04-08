@@ -1,0 +1,14 @@
+{
+  "patch_size": 64,
+  "stride": 32,
+  "model_name": "daclip_ViT-B-32",
+  "faiss_metric": "cosine",
+  "faiss_index_type": "IndexFlatIP",
+  "normalised": true,
+  "encoding_call": "model.encode_image(image, control=True) -> degra_features",
+  "num_patches": 2050526,
+  "num_images": 800,
+  "datasets": [
+    "/kaggle/input/datasets/joe1995/div2k-dataset/DIV2K_train_HR"
+  ]
+}
