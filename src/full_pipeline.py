@@ -7,12 +7,14 @@ Full workflow:
 3. FAISS Retrieval - Find similar clean patches from index
 4. Context Fusion - Combine retrieved patches with query
 5. Save Tensors - Store fused embeddings for decoder
+6. Decoding - Transform embeddings to restored patches
 
 Modular, logging, progress tracking, error handling.
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pathlib import Path
 import json
 import logging
@@ -33,6 +35,154 @@ try:
     from modules.patch_extraction import PatchExtractor
 except ImportError as e:
     print(f"Warning: Could not import all modules: {e}")
+
+
+# ============================================================================
+# Phase 6: Decoder Architecture
+# ============================================================================
+
+class DecoderBlock(nn.Module):
+    """Single decoder block with upsampling."""
+    
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        scale_factor: int = 2,
+        use_conv_transpose: bool = False
+    ):
+        super().__init__()
+        
+        self.use_conv_transpose = use_conv_transpose
+        
+        if use_conv_transpose:
+            self.upsample = nn.ConvTranspose2d(
+                in_channels,
+                out_channels,
+                kernel_size=2 * scale_factor,
+                stride=scale_factor,
+                padding=scale_factor // 2
+            )
+        else:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=scale_factor, mode='nearest'),
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+            )
+        
+        self.norm = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.norm2 = nn.BatchNorm2d(out_channels)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = self.norm(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.relu(x)
+        return x
+
+
+class ResidualBlock(nn.Module):
+    """Residual block for skip connections."""
+    
+    def __init__(self, channels: int, kernel_size: int = 3):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size, padding=padding)
+        self.norm1 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size, padding=padding)
+        self.norm2 = nn.BatchNorm2d(channels)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        return x + identity
+
+
+class UNetDecoder(nn.Module):
+    """UNet-style decoder: (B, 512) → (B, 3, 64, 64)"""
+    
+    def __init__(
+        self,
+        embedding_dim: int = 512,
+        output_channels: int = 3,
+        use_residual: bool = True,
+        use_conv_transpose: bool = False,
+        dropout_rate: float = 0.0
+    ):
+        super().__init__()
+        
+        # Step 1: Latent Projection (512 → 256*8*8)
+        self.projection = nn.Linear(embedding_dim, 256 * 8 * 8)
+        self.norm_proj = nn.LayerNorm(256 * 8 * 8)
+        self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else None
+        
+        # Step 2: UNet Decoder Blocks
+        self.block1 = DecoderBlock(256, 128, scale_factor=2, use_conv_transpose=use_conv_transpose)
+        self.res_block1 = ResidualBlock(128) if use_residual else None
+        
+        self.block2 = DecoderBlock(128, 64, scale_factor=2, use_conv_transpose=use_conv_transpose)
+        self.res_block2 = ResidualBlock(64) if use_residual else None
+        
+        self.block3 = DecoderBlock(64, 32, scale_factor=2, use_conv_transpose=use_conv_transpose)
+        self.res_block3 = ResidualBlock(32) if use_residual else None
+        
+        # Step 3: Final Output
+        self.final_conv = nn.Conv2d(32, output_channels, kernel_size=3, padding=1)
+        self.activation = nn.Tanh()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, 512) → (B, 3, 64, 64)"""
+        batch_size = x.shape[0]
+        
+        # Project and reshape
+        x = self.projection(x)
+        x = self.norm_proj(x)
+        
+        if self.dropout is not None:
+            x = self.dropout(x)
+        
+        x = x.view(batch_size, 256, 8, 8)
+        
+        # Decoder blocks
+        x = self.block1(x)
+        if self.res_block1 is not None:
+            x = self.res_block1(x)
+        
+        x = self.block2(x)
+        if self.res_block2 is not None:
+            x = self.res_block2(x)
+        
+        x = self.block3(x)
+        if self.res_block3 is not None:
+            x = self.res_block3(x)
+        
+        # Final output
+        x = self.final_conv(x)
+        x = self.activation(x)
+        
+        return x
+
+
+def normalize_output(
+    tensor: torch.Tensor,
+    from_range: Tuple[float, float] = (-1, 1),
+    to_range: Tuple[float, float] = (0, 1)
+) -> torch.Tensor:
+    """Normalize tensor from one range to another."""
+    from_min, from_max = from_range
+    to_min, to_max = to_range
+    
+    tensor = torch.clamp(tensor, from_min, from_max)
+    normalized = (tensor - from_min) / (from_max - from_min)
+    return normalized * (to_max - to_min) + to_min
 
 
 # Setup logging
@@ -254,6 +404,28 @@ class RAGImageRestorationPipeline:
             )
             self.fusion_pipeline = self.fusion_pipeline.to(self.device)
             self.logger.info("Context Fusion initialized successfully")
+            
+            # 6. UNet Decoder (Phase 6)
+            self.logger.info("\n[6/6] Initializing UNet Decoder...")
+            self.decoder = UNetDecoder(
+                embedding_dim=embedding_dim,
+                output_channels=3,
+                use_residual=True,
+                use_conv_transpose=False,
+                dropout_rate=0.0
+            )
+            self.decoder = self.decoder.to(self.device)
+            
+            # Load pretrained weights
+            decoder_checkpoint = Path("checkpoints/decoder_pretrained.pt")
+            if decoder_checkpoint.exists():
+                checkpoint = torch.load(decoder_checkpoint, map_location=self.device)
+                self.decoder.load_state_dict(checkpoint["model_state_dict"])
+                self.logger.info(f"✓ Loaded pretrained decoder from {decoder_checkpoint}")
+            else:
+                self.logger.warning(f"Pretrained decoder not found at {decoder_checkpoint}. Using random initialization.")
+            
+            self.logger.info(f"Decoder initialized with {sum(p.numel() for p in self.decoder.parameters()):,} parameters")
         
         except Exception as e:
             self.logger.error(f"Error initializing components: {e}")
@@ -412,6 +584,62 @@ class RAGImageRestorationPipeline:
                 "file_size_kb": output_path.stat().st_size / 1024
             }
             
+            # Step 6: Reconstruct patches from fused embeddings
+            self.logger.info("\nStep 6: Reconstructing patches from fused embeddings...")
+            try:
+                # Use the UNet decoder with fused spatial embeddings
+                # Fused embeddings are (B, 512, 16, 16) from attention fusion
+                
+                if fused_embeddings.dim() == 4:
+                    # Reduce spatial dimensions: (B, 512, 16, 16) → (B, 512)
+                    # Use adaptive average pooling
+                    batch_size, channels, h, w = fused_embeddings.shape
+                    fused_reduced = F.adaptive_avg_pool2d(fused_embeddings, 1)  # (B, 512, 1, 1)
+                    fused_reduced = fused_reduced.squeeze(-1).squeeze(-1)  # (B, 512)
+                    fused_reduced = fused_reduced.to(self.device)
+                else:
+                    fused_reduced = fused_embeddings.to(self.device)
+                
+                # Decode with trained neural network
+                with torch.no_grad():
+                    decoded_patches = self.decoder(fused_reduced).cpu()  # (B, 3, 64, 64)
+                
+                # Decoder uses Tanh activation → output is [-1, 1]
+                # Convert to [0, 1] range
+                decoded_patches = (decoded_patches + 1) / 2
+                decoded_patches = torch.clamp(decoded_patches, 0, 1)
+                
+                # Log output stats
+                self.logger.info(f"Decoder output range: [{decoded_patches.min():.6f}, {decoded_patches.max():.6f}]")
+                self.logger.info(f"Decoder output mean: {decoded_patches.mean():.6f}")
+                
+                # Save decoded patches
+                from torchvision.utils import save_image
+                decoded_path = output_dir / f"{Path(image_path).stem}_decoded.pt"
+                torch.save(decoded_patches, decoded_path)
+                
+                self.logger.info(f"Reconstructed patches shape: {decoded_patches.shape}")
+                self.logger.info(f"Saved reconstructed patches to: {decoded_path}")
+                self.logger.info(f"Decoded file size: {decoded_path.stat().st_size / 1024:.2f} KB")
+                
+                # Save first patch as PNG for visualization
+                png_path = output_dir / f"{Path(image_path).stem}_decoded_sample.png"
+                save_image(decoded_patches[0:1], str(png_path))
+                self.logger.info(f"Saved sample reconstructed patch to: {png_path}")
+                
+                results["steps"]["decoding"] = {
+                    "output_shape": str(decoded_patches.shape),
+                    "output_range": f"[{decoded_patches.min():.4f}, {decoded_patches.max():.4f}]",
+                    "method": "spatial_upsampling_from_fused_embeddings",
+                    "decoded_path": str(decoded_path),
+                    "sample_png": str(png_path)
+                }
+            
+            except Exception as e:
+                self.logger.error(f"Reconstruction error: {e}")
+                self.logger.error(traceback.format_exc())
+                results["steps"]["decoding"] = {"status": "failed", "error": str(e)}
+            
             results["status"] = "success"
             self.logger.info("\n" + "=" * 80)
             self.logger.info("Image processing completed successfully")
@@ -515,4 +743,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
