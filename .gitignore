@@ -5,3 +5,4 @@ __pycache__
 *.pyd
 images/image3.png
 indexes/
+images/0*.png

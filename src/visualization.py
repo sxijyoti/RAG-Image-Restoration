@@ -8,15 +8,11 @@ import numpy as np
 from typing import List, Union, Optional, Tuple
 from pathlib import Path
 
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    from matplotlib.gridspec import GridSpec
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.gridspec import GridSpec
 
-
+MATPLOTLIB_AVAILABLE = True
 class RetrievalVisualizer:
     """Visualize query patch and retrieved results."""
     
