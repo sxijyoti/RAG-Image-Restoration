@@ -1,0 +1,29 @@
+# Configuration for Image Restoration Pipeline
+
+# Patch extraction settings
+patch_size: 64        # Size of image patches (pixels)
+stride: 32            # Stride between patches (pixels)
+
+# Retrieval settings
+top_k: 5              # Number of similar patches to retrieve
+
+# Model settings
+model_name: "ViT-B-32"        # DA-CLIP model architecture
+pretrained: "openai"          # Pretrained weights variant
+
+# Fusion settings
+fusion_method: "mean"         # Method for fusing embeddings: "mean" or "concat"
+
+# Device settings
+device: "auto"                # Device: "cuda", "cpu", "mps", or "auto" for auto-detection
+
+# Decoder settings
+decoder_type: "simple"        # Type of decoder: "simple" or "pretrained"
+# decoder_checkpoint: null    # Path to decoder checkpoint (optional)
+
+# Stitching settings
+stitching_method: "average"   # Method: "average" or "weighted"
+stitching_kernel: "gaussian"  # Kernel for weighted stitching: "gaussian", "raised_cosine", "uniform"
+
+# Batch processing
+batch_size: 16                # Batch size for encoding

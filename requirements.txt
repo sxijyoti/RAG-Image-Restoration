@@ -1,0 +1,23 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+Pillow>=9.0.0
+
+# CLIP and embedding
+open-clip-torch>=2.20.0
+
+# Retrieval
+faiss-cpu>=1.7.4
+
+# Configuration and utilities
+PyYAML>=6.0
+tqdm>=4.65.0
+
+# Optional visualization
+matplotlib>=3.7.0
+
+# Development (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+# pylint>=2.17.0
