@@ -1,7 +1,8 @@
 {
   "patch_size": 64,
   "stride": 32,
-  "model_name": "daclip_ViT-B-32",
+  "model_name": "ViT-B-32",
+  "pretrained": "laion2b_s34b_b79k",
   "faiss_metric": "cosine",
   "faiss_index_type": "IndexFlatIP",
   "normalised": true,
