@@ -8,3 +8,5 @@ indexes/
 images/0*.png
 logs/
 checkpoints*/
+paper_filled.tex
+paper.tex

@@ -33,6 +33,7 @@ try:
     from retrieval import FAISSIndexLoader, PatchRetriever, PatchLoader
     from context_fusion import ContextFusionPipeline
     from modules.patch_extraction import PatchExtractor
+    from image_reconstruction import ImageReconstructor
 except ImportError as e:
     print(f"Warning: Could not import all modules: {e}")
 
@@ -271,6 +272,8 @@ class RAGImageRestorationPipeline:
         self.retriever = None
         self.patch_loader = None
         self.fusion_pipeline = None
+        self.decoder = None
+        self.reconstructor = None
         
         self.fusion_strategy = fusion_strategy
         self.dataset_root = Path(dataset_root) if dataset_root else None
@@ -406,7 +409,7 @@ class RAGImageRestorationPipeline:
             self.logger.info("Context Fusion initialized successfully")
             
             # 6. UNet Decoder (Phase 6)
-            self.logger.info("\n[6/6] Initializing UNet Decoder...")
+            self.logger.info("\n[6/7] Initializing UNet Decoder...")
             self.decoder = UNetDecoder(
                 embedding_dim=embedding_dim,
                 output_channels=3,
@@ -426,6 +429,16 @@ class RAGImageRestorationPipeline:
                 self.logger.warning(f"Pretrained decoder not found at {decoder_checkpoint}. Using random initialization.")
             
             self.logger.info(f"Decoder initialized with {sum(p.numel() for p in self.decoder.parameters()):,} parameters")
+            
+            # 7. Image Reconstructor (Phase 7)
+            self.logger.info("\n[7/7] Initializing Image Reconstructor...")
+            self.reconstructor = ImageReconstructor(
+                patch_size=self.config.get("patch_size", 64),
+                stride=self.config.get("stride", 32),
+                debug=self.debug,
+                logger=self.logger
+            )
+            self.logger.info("Image Reconstructor initialized successfully")
         
         except Exception as e:
             self.logger.error(f"Error initializing components: {e}")
@@ -634,6 +647,66 @@ class RAGImageRestorationPipeline:
                     "decoded_path": str(decoded_path),
                     "sample_png": str(png_path)
                 }
+                
+                # Step 7: Reconstruct full image from patches
+                self.logger.info("\nStep 7: Reconstructing full image from decoded patches...")
+                try:
+                    # Load original image to get dimensions
+                    from PIL import Image as PILImage
+                    original_image = PILImage.open(image_path)
+                    original_image_array = np.array(original_image.convert("RGB"))
+                    original_height, original_width, _ = original_image_array.shape
+                    
+                    self.logger.info(f"Original image size: {original_width}×{original_height}")
+                    
+                    # Reconstruct using ImageReconstructor
+                    restored_image = self.reconstructor.reconstruct(
+                        decoded_patches,
+                        coords,
+                        (original_height, original_width, 3),
+                        blend_mode="average"
+                    )
+                    
+                    # Save restored image
+                    restored_image_path = output_dir / f"{Path(image_path).stem}_restored.png"
+                    self.reconstructor.save_reconstructed_image(
+                        restored_image,
+                        restored_image_path,
+                        format="png"
+                    )
+                    
+                    self.logger.info(f"Restored image shape: {restored_image.shape}")
+                    self.logger.info(f"Restored image range: [{restored_image.min():.6f}, {restored_image.max():.6f}]")
+                    
+                    # Optional: Save reconstruction statistics
+                    stats_path = output_dir / f"{Path(image_path).stem}_reconstruction_stats.json"
+                    stats = {
+                        "original_size": f"{original_width}×{original_height}",
+                        "num_patches": len(patches),
+                        "patch_size": self.config.get("patch_size", 64),
+                        "stride": self.config.get("stride", 32),
+                        "restored_image_range": f"[{float(restored_image.min()):.6f}, {float(restored_image.max()):.6f}]",
+                        "restored_image_mean": float(restored_image.mean()),
+                        "output_path": str(restored_image_path)
+                    }
+                    with open(stats_path, 'w') as f:
+                        json.dump(stats, f, indent=2)
+                    
+                    results["steps"]["reconstruction"] = {
+                        "status": "success",
+                        "restored_image_path": str(restored_image_path),
+                        "restored_size": f"{original_width}×{original_height}",
+                        "output_range": f"[{float(restored_image.min()):.6f}, {float(restored_image.max()):.6f}]",
+                        "stats_file": str(stats_path)
+                    }
+                    
+                except Exception as e:
+                    self.logger.error(f"Image reconstruction error: {e}")
+                    self.logger.error(traceback.format_exc())
+                    results["steps"]["reconstruction"] = {
+                        "status": "failed",
+                        "error": str(e)
+                    }
             
             except Exception as e:
                 self.logger.error(f"Reconstruction error: {e}")
