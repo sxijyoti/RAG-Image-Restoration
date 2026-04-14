@@ -8,3 +8,4 @@ indexes/
 images/0*.png
 logs/
 checkpoints*/
+*.pt
