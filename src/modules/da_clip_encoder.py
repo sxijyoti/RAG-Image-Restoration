@@ -225,6 +225,13 @@ class DACLIPEncoder:
             
             # Move to CPU and detach
             embedding = embedding.cpu().detach()
+            
+            # CRITICAL: Normalize embedding shape to (1, embedding_dim) or (embedding_dim,)
+            # Handle cases where model returns (1, 1, 512), (1, 512), (512,), etc.
+            if embedding.dim() == 3:  # (batch, 1, 512) - squeeze middle dimension
+                embedding = embedding.squeeze(1)  # (batch, 512)
+            if embedding.dim() == 1:  # (512,) - add batch dimension
+                embedding = embedding.unsqueeze(0)  # (1, 512)
         
         if debug:
             print(f"Encoded patch: {embedding.shape}")
@@ -281,10 +288,20 @@ class DACLIPEncoder:
                     embeddings = F.normalize(embeddings, p=2, dim=-1)
                 
                 embeddings = embeddings.cpu().detach()
+                
+                # CRITICAL: Normalize embedding shape to (batch, embedding_dim)
+                # Handle cases where model returns (batch, 1, 512)
+                if embeddings.dim() == 3:  # (batch, 1, 512) - squeeze middle dimension
+                    embeddings = embeddings.squeeze(1)  # (batch, 512)
+                
                 all_embeddings.append(embeddings)
         
         # Concatenate all batches
         result = torch.cat(all_embeddings, dim=0)
+        
+        # Final shape validation
+        if result.dim() != 2 or result.shape[1] != self.embedding_dim:
+            raise ValueError(f"Expected (N, {self.embedding_dim}), got {result.shape}")
         
         if debug:
             print(f"Encoded batch of {len(patches)} patches:")
