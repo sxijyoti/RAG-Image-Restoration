@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+images/image3.png
+indexes/
+images/0*.png
+logs/
+checkpoints*/
+*.pt
